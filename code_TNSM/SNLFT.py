@@ -1,0 +1,489 @@
+import numpy as np
+import pandas as pd
+from scipy import stats
+import time
+from typing import List, Tuple, Dict, Set
+import random
+import os
+from collections import defaultdict
+
+class Quadrup:
+    """四元组数据结构，用于存储用户-服务-时间-值的数据"""
+    def __init__(self):
+        self.uID = 0
+        self.sID = 0
+        self.tID = 0
+        self.value = 0.0
+
+class SNLFT:
+    """Sampling-Neighborhood-Regularized Latent Factorization of Tensor Model"""
+    
+    def __init__(self, R=20, lambda_reg=0.01, alpha1=0.1, alpha2=0.2, 
+                 K1_prime=15, K2_prime=45, learning_rate=0.01, 
+                 T_Gibbs=100, T0=20, kappa_sq=1.0):
+        """
+        Initialize SNLFT model
+        
+        Args:
+            R: Dimension of latent factor space
+            lambda_reg: L2 regularization parameter
+            alpha1: User neighborhood regularization parameter
+            alpha2: Service neighborhood regularization parameter
+            K1_prime: Number of user neighbors
+            K2_prime: Number of service neighbors
+            learning_rate: Learning rate for SGD
+            T_Gibbs: Total Gibbs sampling iterations
+            T0: Burn-in period for Gibbs sampling
+            kappa_sq: Similarity variance for Gibbs sampling
+        """
+        self.R = R
+        self.lambda_reg = lambda_reg
+        self.alpha1 = alpha1
+        self.alpha2 = alpha2
+        self.K1_prime = K1_prime
+        self.K2_prime = K2_prime
+        self.learning_rate = learning_rate
+        self.T_Gibbs = T_Gibbs
+        self.T0 = T0
+        self.kappa_sq = kappa_sq
+        
+        # Model parameters
+        self.U = None  # User latent factors (primal)
+        self.S = None  # Service latent factors (primal) 
+        self.T = None  # Time latent factors
+        self.U_prime = None  # User latent factors (regularized)
+        self.S_prime = None  # Service latent factors (regularized)
+        
+        # Neighborhood sets
+        self.T_u_prime = None  # User sampling neighborhoods
+        self.T_s_prime = None  # Service sampling neighborhoods
+        
+        # Similarity weights
+        self.S_u_weights = None
+        self.S_s_weights = None
+        
+    def init_data(self, input_file, separator=":"):
+        """
+        读取数据文件，格式与BNLFT.py一致
+        
+        Args:
+            input_file: 数据文件路径
+            separator: 分隔符
+            
+        Returns:
+            data: 数据列表 [Quadrup对象列表]
+            dims: 数据维度 [max_user, max_service, max_time]
+        """
+        data = []
+        uNum, sNum, tNum = 0, 0, 0
+        
+        if not os.path.exists(input_file):
+            print(f"文件 {input_file} 不存在")
+            return data, [uNum, sNum, tNum]
+            
+        with open(input_file, 'r') as f:
+            for line in f:
+                parts = line.strip().split(separator)
+                if len(parts) < 4:
+                    continue
+
+                uID = int(parts[0])
+                s = float(parts[1])
+                sID = int(s)
+                t = float(parts[2])
+                tID = int(t)
+                value = float(parts[3])
+
+                uNum = max(uNum, uID)
+                sNum = max(sNum, sID)
+                tNum = max(tNum, tID)
+
+                qtemp = Quadrup()
+                qtemp.uID = uID
+                qtemp.sID = sID
+                qtemp.tID = tID
+                qtemp.value = value
+                data.append(qtemp)
+        
+        print(f"文件 {input_file} 读取完成:")
+        print(f"  用户数: {uNum}")
+        print(f"  服务数: {sNum}")
+        print(f"  时间点数: {tNum}")
+        print(f"  总样本数: {len(data)}")
+        
+        return data, [uNum, sNum, tNum]
+    
+    def stratified_split_data(self, data, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15, random_state=42):
+        """
+        使用分层抽样方法划分数据集
+        
+        Args:
+            data: 数据列表 [Quadrup对象列表]
+            train_ratio: 训练集比例
+            val_ratio: 验证集比例
+            test_ratio: 测试集比例
+            random_state: 随机种子
+        
+        Returns:
+            train_data, val_data, test_data: 划分后的数据集
+        """
+        # 确保比例总和为1
+        assert abs(train_ratio + val_ratio + test_ratio - 1.0) < 1e-6, "比例总和必须为1"
+        
+        # 按用户分组
+        user_data = {}
+        for item in data:
+            if item.uID not in user_data:
+                user_data[item.uID] = []
+            user_data[item.uID].append(item)
+        
+        # 对每个用户的记录进行分层抽样
+        train_data, val_data, test_data = [], [], []
+        
+        np.random.seed(random_state)
+        for user_id, user_items in user_data.items():
+            # 打乱用户数据
+            np.random.shuffle(user_items)
+            
+            # 计算各部分的数量
+            n_total = len(user_items)
+            n_train = int(n_total * train_ratio)
+            n_val = int(n_total * val_ratio)
+            # 剩余的为测试集
+            
+            # 分配数据
+            train_data.extend(user_items[:n_train])
+            val_data.extend(user_items[n_train:n_train+n_val])
+            test_data.extend(user_items[n_train+n_val:])
+        
+        print(f"分层抽样结果:")
+        print(f"  训练集: {len(train_data)} 样本")
+        print(f"  验证集: {len(val_data)} 样本")
+        print(f"  测试集: {len(test_data)} 样本")
+        
+        return train_data, val_data, test_data
+    
+    def convert_to_tensor_format(self, data):
+        """
+        将Quadrup格式数据转换为训练所需的元组格式
+        
+        Args:
+            data: Quadrup对象列表
+            
+        Returns:
+            tensor_data: (i, j, k, y_ijk) 元组列表
+            indices: (user_count, service_count, time_count)
+        """
+        tensor_data = []
+        uNum, sNum, tNum = 0, 0, 0
+        
+        for item in data:
+            uNum = max(uNum, item.uID)
+            sNum = max(sNum, item.sID)
+            tNum = max(tNum, item.tID)
+            tensor_data.append((item.uID, item.sID, item.tID, item.value))
+        
+        return tensor_data, (uNum+1, sNum+1, tNum+1)
+    
+    def extract_primal_lf(self, tensor_data, indices, max_iter=100, tol=1e-4):
+        """
+        Step 1: Extract primal latent factors without regularization
+        
+        Args:
+            tensor_data: List of (i, j, k, y_ijk) tuples
+            indices: Tuple of (user_count, service_count, time_count)
+            max_iter: Maximum iterations for SGD
+            tol: Convergence tolerance
+        """
+        I, J, K = indices
+        
+        # Initialize latent factor matrices
+        self.U = np.random.normal(0, 0.1, (I, self.R))
+        self.S = np.random.normal(0, 0.1, (J, self.R))
+        self.T = np.random.normal(0, 0.1, (K, self.R))
+        
+        print("Extracting primal latent factors...")
+        prev_loss = float('inf')
+        
+        for iteration in range(max_iter):
+            total_loss = 0
+            np.random.shuffle(tensor_data)
+            
+            for i, j, k, y_ijk in tensor_data:
+                # Prediction
+                pred = np.sum(self.U[i] * self.S[j] * self.T[k])
+                error = y_ijk - pred
+                
+                # Update factors using SGD (Equation 11)
+                grad_U = -self.S[j] * self.T[k] * error
+                grad_S = -self.U[i] * self.T[k] * error  
+                grad_T = -self.U[i] * self.S[j] * error
+                
+                self.U[i] -= self.learning_rate * grad_U
+                self.S[j] -= self.learning_rate * grad_S
+                self.T[k] -= self.learning_rate * grad_T
+                
+                total_loss += error ** 2
+            
+            current_loss = total_loss / len(tensor_data)
+            
+            if iteration % 10 == 0:
+                print(f"Iteration {iteration}, Loss: {current_loss:.6f}")
+            
+            if abs(prev_loss - current_loss) < tol:
+                print(f"Converged at iteration {iteration}")
+                break
+                
+            prev_loss = current_loss
+    
+    def calculate_pcc_similarity(self, matrix):
+        """Calculate PCC similarity between rows of a matrix"""
+        n = matrix.shape[0]
+        similarity = np.zeros((n, n))
+        
+        for i in range(n):
+            for d in range(n):
+                if i != d:
+                    # Pearson correlation coefficient
+                    corr = np.corrcoef(matrix[i], matrix[d])[0, 1]
+                    if np.isnan(corr):
+                        similarity[i, d] = 0
+                    else:
+                        similarity[i, d] = corr
+        
+        return similarity
+    
+    def construct_posterior_neighborhood(self):
+        """Step 2: Construct posterior neighborhood using PCC similarity"""
+        print("Constructing posterior neighborhoods...")
+        
+        user_similarity = self.calculate_pcc_similarity(self.U)
+
+        service_similarity = self.calculate_pcc_similarity(self.S)
+
+        self.user_similarity = user_similarity
+        self.service_similarity = service_similarity
+        
+        return user_similarity, service_similarity
+    
+    def gibbs_sampling_neighborhood(self, similarity_matrix, K_prime, entity_type="user"):
+        print(f"Performing Gibbs sampling for {entity_type} neighborhoods...")
+        
+        n_entities = similarity_matrix.shape[0]
+        T_record = []
+        
+        current_neighbors = np.random.choice(
+            [d for d in range(n_entities) if d != 0],  
+            size=min(K_prime, n_entities-1), 
+            replace=False
+        ).tolist()
+        
+        for t in range(self.T_Gibbs):
+            if len(current_neighbors) > 0:
+                x = np.random.randint(0, len(current_neighbors))
+                member_to_replace = current_neighbors[x]
+
+                candidate_set = [d for d in range(n_entities) 
+                               if d != 0 and d not in current_neighbors]
+                candidate_set.append(member_to_replace)  
+                
+                probabilities = []
+                for candidate in candidate_set:
+                    similarity = max(similarity_matrix[0, candidate], 0)  
+                    prob = np.exp(-similarity / (2 * self.kappa_sq))
+                    probabilities.append(prob)
+                
+                prob_sum = sum(probabilities)
+                if prob_sum > 0:
+                    probabilities = [p / prob_sum for p in probabilities]
+                else:
+                    probabilities = [1.0 / len(probabilities)] * len(probabilities)
+                
+                cum_prob = np.cumsum(probabilities)
+                rand_val = np.random.random()
+                selected_idx = np.searchsorted(cum_prob, rand_val)
+                new_member = candidate_set[selected_idx]
+                
+                current_neighbors[x] = new_member
+                
+                if t > self.T0:
+                    T_record.append(current_neighbors.copy())
+        
+
+        if T_record:
+            freq_count = {}
+            for neighbors in T_record:
+                for neighbor in neighbors:
+                    freq_count[neighbor] = freq_count.get(neighbor, 0) + 1
+            
+            sorted_neighbors = sorted(freq_count.items(), key=lambda x: x[1], reverse=True)
+            final_neighbors = [neighbor for neighbor, count in sorted_neighbors[:K_prime]]
+        else:
+            final_neighbors = current_neighbors[:K_prime]
+        
+        return final_neighbors
+    
+    def construct_sampling_neighborhoods(self):
+        I, J = self.U.shape[0], self.S.shape[0]
+        
+        self.T_u_prime = {}
+        self.T_s_prime = {}
+        
+        sample_users = min(5, I)  
+        sample_services = min(5, J)  
+        
+        for i in range(sample_users):
+            self.T_u_prime[i] = self.gibbs_sampling_neighborhood(
+                self.user_similarity, self.K1_prime, "user"
+            )
+        
+        for j in range(sample_services):
+            self.T_s_prime[j] = self.gibbs_sampling_neighborhood(
+                self.service_similarity, self.K2_prime, "service"
+            )
+        
+        self.calculate_similarity_weights()
+    
+    def calculate_similarity_weights(self):
+        self.S_u_weights = {}
+        self.S_s_weights = {}
+        
+        for i, neighbors in self.T_u_prime.items():
+            total_sim = sum(max(self.user_similarity[i, d], 0) for d in neighbors)
+            if total_sim > 0:
+                self.S_u_weights[i] = {
+                    d: max(self.user_similarity[i, d], 0) / total_sim 
+                    for d in neighbors
+                }
+            else:
+                self.S_u_weights[i] = {d: 1.0 / len(neighbors) for d in neighbors}
+        
+        for j, neighbors in self.T_s_prime.items():
+            total_sim = sum(max(self.service_similarity[j, g], 0) for g in neighbors)
+            if total_sim > 0:
+                self.S_s_weights[j] = {
+                    g: max(self.service_similarity[j, g], 0) / total_sim 
+                    for g in neighbors
+                }
+            else:
+                self.S_s_weights[j] = {g: 1.0 / len(neighbors) for g in neighbors}
+    
+    def build_snlft_model(self, tensor_data, indices, max_iter=100, tol=1e-4):
+        I, J, K = indices
+        
+        # Initialize regularized latent factors
+        self.U_prime = np.copy(self.U)
+        self.S_prime = np.copy(self.S)
+        
+        print("Training SNLFT model with neighborhood regularization...")
+        prev_loss = float('inf')
+        
+        for iteration in range(max_iter):
+            total_loss = 0
+            np.random.shuffle(tensor_data)
+            
+            for i, j, k, y_ijk in tensor_data:
+                pred = np.sum(self.U_prime[i] * self.S_prime[j] * self.T[k])
+                error = y_ijk - pred
+
+                user_reg_term = 0
+                if i in self.T_u_prime:
+                    for d in self.T_u_prime[i]:
+                        weight = self.S_u_weights[i][d]
+                        user_reg_term += weight * (self.U_prime[i] - self.U_prime[d])
+                
+                service_reg_term = 0  
+                if j in self.T_s_prime:
+                    for g in self.T_s_prime[j]:
+                        weight = self.S_s_weights[j][g]
+                        service_reg_term += weight * (self.S_prime[j] - self.S_prime[g])
+
+                grad_U_prime = (self.S_prime[j] * self.T[k] * error - 
+                              self.lambda_reg * self.U_prime[i] - 
+                              self.alpha1 * user_reg_term)
+                
+                grad_S_prime = (self.U_prime[i] * self.T[k] * error - 
+                              self.lambda_reg * self.S_prime[j] - 
+                              self.alpha2 * service_reg_term)
+                
+                grad_T = (self.U_prime[i] * self.S_prime[j] * error - 
+                         self.lambda_reg * self.T[k])
+                
+                self.U_prime[i] += self.learning_rate * grad_U_prime
+                self.S_prime[j] += self.learning_rate * grad_S_prime
+                self.T[k] += self.learning_rate * grad_T
+                
+                instance_loss = 0.5 * error ** 2
+                instance_loss += 0.5 * self.lambda_reg * (
+                    np.sum(self.U_prime[i] ** 2) + 
+                    np.sum(self.S_prime[j] ** 2) + 
+                    np.sum(self.T[k] ** 2)
+                )
+                
+                if i in self.T_u_prime:
+                    neighbor_loss = 0
+                    for d in self.T_u_prime[i]:
+                        weight = self.S_u_weights[i][d]
+                        neighbor_loss += weight * np.sum((self.U_prime[i] - self.U_prime[d]) ** 2)
+                    instance_loss += 0.5 * self.alpha1 * neighbor_loss
+                
+                if j in self.T_s_prime:
+                    neighbor_loss = 0
+                    for g in self.T_s_prime[j]:
+                        weight = self.S_s_weights[j][g]
+                        neighbor_loss += weight * np.sum((self.S_prime[j] - self.S_prime[g]) ** 2)
+                    instance_loss += 0.5 * self.alpha2 * neighbor_loss
+                
+                total_loss += instance_loss
+            
+            current_loss = total_loss / len(tensor_data)
+            
+            if iteration % 10 == 0:
+                print(f"Iteration {iteration}, Loss: {current_loss:.6f}")
+            
+            if abs(prev_loss - current_loss) < tol:
+                print(f"Converged at iteration {iteration}")
+                break
+                
+            prev_loss = current_loss
+    
+    def predict(self, i, j, k):
+        if self.U_prime is not None and self.S_prime is not None and self.T is not None:
+            return np.sum(self.U_prime[i] * self.S_prime[j] * self.T[k])
+        else:
+            return np.sum(self.U[i] * self.S[j] * self.T[k])
+    
+    def fit(self, train_data, val_data=None):
+        print("Starting SNLFT training pipeline...")
+        
+        # Convert data to tensor format
+        train_tensor, indices = self.convert_to_tensor_format(train_data)
+ 
+        self.extract_primal_lf(train_tensor, indices)
+        self.construct_posterior_neighborhood()
+        self.construct_sampling_neighborhoods()
+        self.build_snlft_model(train_tensor, indices)
+        
+        if val_data is not None:
+            val_tensor, _ = self.convert_to_tensor_format(val_data)
+            rmse, mae = self.evaluate(val_tensor)
+            print(f"Validation RMSE: {rmse:.4f}, MAE: {mae:.4f}")
+        
+        print("SNLFT training completed!")
+    
+    def evaluate(self, test_data):
+        predictions = []
+        true_values = []
+        
+        for i, j, k, y_true in test_data:
+            y_pred = self.predict(i, j, k)
+            predictions.append(y_pred)
+            true_values.append(y_true)
+        
+        predictions = np.array(predictions)
+        true_values = np.array(true_values)
+        
+        rmse = np.sqrt(np.mean((predictions - true_values) ** 2))
+        mae = np.mean(np.abs(predictions - true_values))
+        
+        return rmse, mae
