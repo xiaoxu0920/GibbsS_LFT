@@ -64,8 +64,6 @@ class SNLFT:
         
     def init_data(self, input_file, separator=":"):
         """
-        读取数据文件，格式与BNLFT.py一致
-        
         Args:
             input_file: 数据文件路径
             separator: 分隔符
@@ -165,8 +163,6 @@ class SNLFT:
     
     def convert_to_tensor_format(self, data):
         """
-        将Quadrup格式数据转换为训练所需的元组格式
-        
         Args:
             data: Quadrup对象列表
             
