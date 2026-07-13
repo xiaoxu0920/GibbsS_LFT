@@ -103,7 +103,7 @@ class SNLFT:
         
         return data, [uNum, sNum, tNum]
     
-    def stratified_split_data(self, data, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15, random_state=42):
+    def stratified_split_data(self, data, train_ratio=0.05, val_ratio=0.05, test_ratio=0.9, random_state=42):
         """使用分层抽样方法划分数据集"""
         assert abs(train_ratio + val_ratio + test_ratio - 1.0) < 1e-6, "比例总和必须为1"
         
