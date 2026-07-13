@@ -215,12 +215,11 @@ class SNLFT:
         
         return user_similarity, service_similarity
     
-    # [FIXED] 增加了 entity_id 参数，避免硬编码 0 导致逻辑错误
+    
     def gibbs_sampling_neighborhood(self, similarity_matrix, K_prime, entity_id, entity_type="user"):
         n_entities = similarity_matrix.shape[0]
         T_record = []
-        
-        # [FIXED] 使用 entity_id 过滤，而不是写死 0
+     
         current_neighbors = np.random.choice(
             [d for d in range(n_entities) if d != entity_id],  
             size=min(K_prime, n_entities-1), 
@@ -232,7 +231,7 @@ class SNLFT:
                 x = np.random.randint(0, len(current_neighbors))
                 member_to_replace = current_neighbors[x]
 
-                # [FIXED] 使用 entity_id 过滤
+
                 candidate_set = [d for d in range(n_entities) 
                                if d != entity_id and d not in current_neighbors]
                 candidate_set.append(member_to_replace)  
@@ -280,11 +279,11 @@ class SNLFT:
         self.T_u_prime = {}
         self.T_s_prime = {}
         
-        # [FIXED] 移除了 sample_users 和 sample_services 的截断逻辑
+
         
         # 遍历所有用户
         for i in range(I):
-            # [FIXED] 传入当前的 i 作为 entity_id
+
             self.T_u_prime[i] = self.gibbs_sampling_neighborhood(
                 self.user_similarity, self.K1_prime, i, "user"
             )
