@@ -104,8 +104,7 @@ class SNLFT:
         return data, [uNum, sNum, tNum]
     
     def stratified_split_data(self, data, train_ratio=0.05, val_ratio=0.05, test_ratio=0.9, random_state=42):
-        """使用分层抽样方法划分数据集"""
-        assert abs(train_ratio + val_ratio + test_ratio - 1.0) < 1e-6, "比例总和必须为1"
+        assert abs(train_ratio + val_ratio + test_ratio - 1.0) < 1e-6, 
         
         user_data = {}
         for item in data:
@@ -135,7 +134,6 @@ class SNLFT:
         return train_data, val_data, test_data
     
     def convert_to_tensor_format(self, data):
-        """将Quadrup格式数据转换为训练所需的元组格式"""
         tensor_data = []
         uNum, sNum, tNum = 0, 0, 0
         
@@ -188,7 +186,6 @@ class SNLFT:
             prev_loss = current_loss
     
     def calculate_pcc_similarity(self, matrix):
-        """Calculate PCC similarity between rows of a matrix"""
         n = matrix.shape[0]
         similarity = np.zeros((n, n))
         
@@ -204,7 +201,6 @@ class SNLFT:
         return similarity
     
     def construct_posterior_neighborhood(self):
-        """Step 2: Construct posterior neighborhood using PCC similarity"""
         print("Constructing posterior neighborhoods...")
         
         user_similarity = self.calculate_pcc_similarity(self.U)
@@ -238,7 +234,6 @@ class SNLFT:
                 
                 probabilities = []
                 for candidate in candidate_set:
-                    # [FIXED] 获取 entity_id 和 candidate 之间的相似度，而不是 0
                     similarity = max(similarity_matrix[entity_id, candidate], 0)  
                     prob = np.exp(-similarity / (2 * self.kappa_sq))
                     probabilities.append(prob)
@@ -279,18 +274,13 @@ class SNLFT:
         self.T_u_prime = {}
         self.T_s_prime = {}
         
-
-        
-        # 遍历所有用户
         for i in range(I):
-
             self.T_u_prime[i] = self.gibbs_sampling_neighborhood(
                 self.user_similarity, self.K1_prime, i, "user"
             )
         
         # 遍历所有服务
         for j in range(J):
-            # [FIXED] 传入当前的 j 作为 entity_id
             self.T_s_prime[j] = self.gibbs_sampling_neighborhood(
                 self.service_similarity, self.K2_prime, j, "service"
             )
@@ -409,7 +399,6 @@ class SNLFT:
     def fit(self, train_data, val_data=None):
         print("Starting SNLFT training pipeline...")
         
-        # Convert data to tensor format
         train_tensor, indices = self.convert_to_tensor_format(train_data)
  
         self.extract_primal_lf(train_tensor, indices)
